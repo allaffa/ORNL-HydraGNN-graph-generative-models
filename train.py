@@ -35,6 +35,11 @@ def train(args):
     except:
         os.environ["SERIALIZED_DATA_PATH"] = os.getcwd()
 
+    ##################################################################################################################
+    # Always initialize for multi-rank training.
+    comm_size, rank = hydragnn.utils.distributed.setup_ddp()
+    ##################################################################################################################
+
     # Configurable run choices (JSON file that accompanies this example script).
     with open(args.config_path, "r") as f:
         config = json.load(f)
@@ -113,6 +118,7 @@ def train(args):
         config=config["NeuralNetwork"],
         verbosity=verbosity,
     )
+    model = hydragnn.utils.distributed.get_distributed_model(model, verbosity)
     
     # Define training optimizer and scheduler
     learning_rate = config["NeuralNetwork"]["Training"]["Optimizer"]["learning_rate"]
