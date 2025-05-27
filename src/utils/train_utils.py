@@ -6,6 +6,8 @@ from datetime import datetime
 from torch_geometric.data import Data, Batch
 from typing import Dict, Tuple, Any, List, Optional
 
+import hydragnn
+
 from src.processes.diffusion import DiffusionProcess
 from src.processes.equivariant_diffusion import center_gravity
 from src.utils.logging_utils import ModelLoggerHandler
@@ -149,13 +151,8 @@ def get_device():
     --------
         device: The torch device to use for training
     """
-    return torch.device(
-        "mps"
-        if torch.backends.mps.is_available()
-        else "cuda:4"
-        if torch.cuda.is_available()
-        else "cpu"
-    )
+
+    return hydragnn.utils.distributed.get_device()
 
 def postprocess_model_outputs(outputs, data, predict_x0=False):   
     """
@@ -214,6 +211,8 @@ def train_epoch(model, loss_fun, optimizer, dataloader, device, logger_handler, 
     --------
         tuple: (epoch_loss, epoch_pos_loss, epoch_atom_loss, batch_count)
     """
+    comm_size, comm_rank = hydragnn.utils.distributed.get_comm_size_and_rank()
+
     model.train()
     epoch_loss = 0
     epoch_pos_loss = 0  # Positional loss (MSE)
@@ -280,10 +279,11 @@ def train_epoch(model, loss_fun, optimizer, dataloader, device, logger_handler, 
             # Use the mean time across the batch for simplicity
             avg_time = batch.time_norm.float().mean().item()
             loss_components["time"] = avg_time
-            
-        logger_handler.log_batch(
-            loss, batch_count, epoch, len(dataloader), "train", loss_components
-        )
+    
+        if 0 == comm_rank:
+            logger_handler.log_batch(
+                loss, batch_count, epoch, len(dataloader), "train", loss_components
+            )
     
     return epoch_loss, epoch_pos_loss, epoch_atom_loss, batch_count
 
@@ -305,6 +305,8 @@ def validate_epoch(model, loss_fun, dataloader, device, logger_handler, epoch, t
     --------
         tuple: (epoch_val_loss, epoch_val_pos_loss, epoch_val_atom_loss, batch_count_val)
     """
+    comm_size, comm_rank = hydragnn.utils.distributed.get_comm_size_and_rank()
+
     model.eval()
     epoch_val_loss = 0
     epoch_val_pos_loss = 0
@@ -359,15 +361,16 @@ def validate_epoch(model, loss_fun, dataloader, device, logger_handler, epoch, t
                 # Use the mean time across the batch for simplicity
                 avg_time = batch.time_norm.float().mean().item()
                 val_loss_components["time"] = avg_time
-                
-            logger_handler.log_batch(
-                loss,
-                batch_count_val,
-                epoch,
-                len(dataloader),
-                "val",
-                val_loss_components,
-            )
+            
+            if 0 == comm_rank:
+                logger_handler.log_batch(
+                    loss,
+                    batch_count_val,
+                    epoch,
+                    len(dataloader),
+                    "val",
+                    val_loss_components,
+                )
 
     return epoch_val_loss, epoch_val_pos_loss, epoch_val_atom_loss, batch_count_val
 
@@ -387,6 +390,9 @@ def log_epoch_metrics(logger_handler, epoch, train_losses, val_losses, optimizer
     --------
         float: The average epoch loss
     """
+
+    comm_size, comm_rank = hydragnn.utils.distributed.get_comm_size_and_rank()
+
     epoch_loss, epoch_pos_loss, epoch_atom_loss, batch_count = train_losses
     (
         epoch_val_loss,
@@ -414,13 +420,14 @@ def log_epoch_metrics(logger_handler, epoch, train_losses, val_losses, optimizer
     }
 
     # Log epoch metrics with loss component averages
-    logger_handler.log_epoch(
-        epoch,
-        avg_epoch_loss,
-        avg_epoch_val_loss,
-        optimizer.param_groups[0]["lr"],
-        loss_component_avgs,
-    )
+    if 0 == comm_rank:
+        logger_handler.log_epoch(
+            epoch,
+            avg_epoch_loss,
+            avg_epoch_val_loss,
+            optimizer.param_groups[0]["lr"],
+            loss_component_avgs,
+        )
 
     return avg_epoch_loss
 
@@ -462,14 +469,19 @@ def train_model(
     --------
         model: The trained model
     """
+    comm_size, comm_rank = hydragnn.utils.distributed.get_comm_size_and_rank()
+
     device = get_device()
     model.to(device)
 
+    logger_handler = None
+
     # Initialize logger handler
-    logger_handler = ModelLoggerHandler(
-        logger=logger, model_name=model_name, save_freq=save_freq, save_best=save_best
-    )
-    logger_handler.setup(model, config)
+    if 0 == comm_rank:
+        logger_handler = ModelLoggerHandler(
+            logger=logger, model_name=model_name, save_freq=save_freq, save_best=save_best
+        )
+        logger_handler.setup(model, config)
     
     for epoch in tqdm.tqdm(range(num_epochs)):
         # Train for one epoch
@@ -496,10 +508,12 @@ def train_model(
                 scheduler.step()
                 
         # Handle end of epoch (saving checkpoints)
-        logger_handler.handle_epoch_end(epoch, model, optimizer, avg_epoch_loss)
+        if 0 == comm_rank:
+            logger_handler.handle_epoch_end(epoch, model, optimizer, avg_epoch_loss)
 
     print("Training complete!")
-    logger_handler.finish()
+    if 0 == comm_rank:
+        logger_handler.finish()
     return model
 
 def get_train_transform(dp: DiffusionProcess, predict_x0=False):
