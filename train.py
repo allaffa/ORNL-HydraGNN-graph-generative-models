@@ -1,4 +1,8 @@
 import os, json, sys, argparse, random, datetime
+
+import mpi4py
+from mpi4py import MPI
+
 import torch, torch_geometric
 
 # from torchmdnet.models import EquivariantModel
@@ -11,8 +15,6 @@ import hydragnn
 # from hydragnn.utils.print import setup_log
 from hydragnn.utils.input_config_parsing import config_utils
 # from hydragnn.utils import config_utils
-from hydragnn.utils.distributed import setup_ddp
-# from hydragnn.utils.distributed import setup_ddp, get_distributed_model
 from hydragnn.preprocess.graph_samples_checks_and_updates import update_predicted_values
 # from hydragnn.preprocess import update_predicted_values
 
@@ -38,6 +40,7 @@ def train(args):
     ##################################################################################################################
     # Always initialize for multi-rank training.
     comm_size, rank = hydragnn.utils.distributed.setup_ddp()
+    comm = MPI.COMM_WORLD
     ##################################################################################################################
 
     # Configurable run choices (JSON file that accompanies this example script).
@@ -45,10 +48,6 @@ def train(args):
         config = json.load(f)
 
     verbosity = config["Verbosity"]["level"]
-    var_config = config["NeuralNetwork"]["Variables_of_interest"]
-    # Always initialize for multi-rank training.
-    world_size, world_rank = setup_ddp()
-    voi = config["NeuralNetwork"]["Variables_of_interest"]
 
     # Create a MarginalDiffusionProcess object.
     # dp = MarginalDiffusionProcess(
@@ -75,6 +74,16 @@ def train(args):
 
     # Load the QM9 dataset from torch WITHOUT transform (we'll apply it during training)
     # This prevents caching of transformed data with fixed noise
+    # --- 1) download / process only once (rank 0) ------------------------------
+    if rank == 0:
+        # This call triggers download+processing only if the processed files
+        # (raw/*  and processed/*.pt) do not already exist.
+        _ = torch_geometric.datasets.QM9(root=args.data_path, transform=hydra_transform)
+
+    # --- 2) make everybody wait until the dataset is ready ---------------------
+    comm.Barrier()
+
+    # --- 3) now every rank can safely load the dataset -------------------------
     dataset = torch_geometric.datasets.QM9(root=args.data_path, transform=hydra_transform)
 
     # Limit the number of samples if specified.
@@ -160,3 +169,5 @@ if __name__ == "__main__":
     # Store the arguments in args.
     args = parser.parse_args()
     train(args)
+    torch.distributed.destroy_process_group()
+    sys.exit(0)
