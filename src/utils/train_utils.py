@@ -7,6 +7,7 @@ from torch_geometric.data import Data, Batch
 from typing import Dict, Tuple, Any, List, Optional
 
 import hydragnn
+from hydragnn.utils.print.print_utils import print_distributed, iterate_tqdm
 
 from src.processes.diffusion import DiffusionProcess
 from src.processes.equivariant_diffusion import center_gravity
@@ -219,7 +220,10 @@ def train_epoch(model, loss_fun, optimizer, dataloader, device, logger_handler, 
     epoch_atom_loss = 0  # Atom type loss (Cross-entropy)
     batch_count = 0
 
-    for batch_idx, batch in enumerate(dataloader):
+    nbatch = hydragnn.train.get_nbatch(dataloader)
+    for ibatch, batch in iterate_tqdm(
+        enumerate(dataloader), verbosity_level=2, desc="Train", total=nbatch
+    ):
         optimizer.zero_grad()
         # Apply transform to add fresh noise if transform function is provided
         if transform_fn is not None:
@@ -313,7 +317,10 @@ def validate_epoch(model, loss_fun, dataloader, device, logger_handler, epoch, t
     epoch_val_atom_loss = 0
     batch_count_val = 0
     
-    for val_batch_idx, batch in enumerate(dataloader):
+    nbatch = hydragnn.train.get_nbatch(dataloader)
+    for ibatch, batch in iterate_tqdm(
+        enumerate(dataloader), verbosity_level=2, desc="Validate", total=nbatch
+    ):
         with torch.no_grad():
             # Apply transform to add fresh noise if transform function is provided
             if transform_fn is not None:
@@ -451,7 +458,7 @@ def train_model(
 
     Args:
     -----
-        model (torch.nn.Module): The model to be trained.
+        model (torch.nn.parallel.DistributedDataParallel): The model wrapped in DDP to be trained.
         loss_fun (callable): The loss function to compute the training loss.
         optimizer (torch.optim.Optimizer): The optimizer used to update the model's weights.
         train_dataloader (torch.utils.data.DataLoader): An iterable over the training dataset.
@@ -483,7 +490,9 @@ def train_model(
         )
         logger_handler.setup(model, config)
     
-    for epoch in tqdm.tqdm(range(num_epochs)):
+    for iepoch, epoch in iterate_tqdm(
+            enumerate(range(num_epochs)), verbosity_level=2, desc="Epoch", total=num_epochs
+    ):
         # Train for one epoch
         train_losses = train_epoch(
             model, loss_fun, optimizer, train_dataloader, device, logger_handler, epoch, train_transform
@@ -511,7 +520,7 @@ def train_model(
         if 0 == comm_rank:
             logger_handler.handle_epoch_end(epoch, model, optimizer, avg_epoch_loss)
 
-    print("Training complete!")
+    print_distributed(2, "Training complete!")
     if 0 == comm_rank:
         logger_handler.finish()
     return model
@@ -621,7 +630,7 @@ def get_hydra_transform():
     return hydra_transform
 
 
-def get_deterministic_transform(timesteps: int, predict_x0=False):
+def get_deterministic_transform(timesteps: int, predict_x0=False, conditional_chem_comp=False, conditional_forces_norm=False):
     """
     Returns a training transform function that applies a deterministic
     deformation to atom positions instead of random noise.
@@ -670,7 +679,7 @@ def get_deterministic_transform(timesteps: int, predict_x0=False):
         
         return deformed_positions, deformation
 
-    def train_transform(data: Data):
+    def train_transform(data: Data, conditional_chem_comp, conditional_forces_norm):
         data.t = 0  # default
 
         # Only use atom type features
@@ -702,6 +711,11 @@ def get_deterministic_transform(timesteps: int, predict_x0=False):
         noised_data.time_step = torch.tensor([t], device=data.x.device)
         # Also store normalized time (t/timesteps) for binning
         noised_data.time_norm = torch.tensor([time_factor], device=data.x.device)
+
+        if conditional_chem_comp:
+            # Assuming one-hot-encoding representation of atomic numbers
+            chemical_composition = data.x.sum(dim=0).unsqueeze(1)
+            noised_data, time_vec = insert_chemical_composition(noised_data, chemical_composition)
 
         # insert time t into the node features
         noised_data, time_vec = insert_t(noised_data, t, timesteps)
@@ -751,5 +765,22 @@ def insert_t(data: Data, t: int, T: int):
     time_vec = (
         torch.ones((data_ins.num_nodes, 1), device=data_ins.x.device) * t / (T - 1.0)
     )
-    data_ins.x = torch.hstack([data_ins.x, time_vec])  # (n_nodes, 6)
+    data_ins.x = torch.hstack([data_ins.x, time_vec])
     return data_ins, time_vec
+
+
+def insert_chemical_compositions(data: Data, chemical_composition: torch.Tensor):
+    """
+    Insert d-dimensional vector tha provides global chemical composition into the node features of the data before passing
+    to the denoising model.
+
+    Args:
+    -----
+    data (Data):
+        Noised sample from the diffusion process.
+    """
+    data_ins = data.clone().detach_()
+    # concatenate node features and (scaled) time feature
+    chemical_composition_row = chemical_composition.T.repeat(data_ins.x.size(0), 1)
+    data_ins.x = torch.hstack([data_ins.x, chemical_composition_row])
+    return data_ins

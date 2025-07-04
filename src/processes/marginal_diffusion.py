@@ -30,10 +30,10 @@ def sample_atoms(noised_atoms: torch.Tensor, state_dim: int):
         [
             np.random.choice(
                 np.arange(state_dim),
-                p=noised_atoms[i, :].numpy().flatten()
+                p=noised_atoms[i, :].cpu().numpy().flatten()
             ) for i in range(noised_atoms.shape[0])
         ]
-    ).to(torch.long)
+    ).to(torch.long).to(noised_atoms.device)
 
 def cast_2d(x: Tensor, dim: int) -> Tensor:
     """

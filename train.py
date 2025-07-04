@@ -12,11 +12,9 @@ from rdkit import Chem
 from torch_geometric.data import Data, Batch, DataLoader
 
 import hydragnn
-# from hydragnn.utils.print import setup_log
 from hydragnn.utils.input_config_parsing import config_utils
-# from hydragnn.utils import config_utils
 from hydragnn.preprocess.graph_samples_checks_and_updates import update_predicted_values
-# from hydragnn.preprocess import update_predicted_values
+from hydragnn.utils.print.print_utils import print_distributed, iterate_tqdm
 
 from src.utils import diffusion_utils as du
 from src.processes.diffusion import DiffusionProcess
@@ -59,7 +57,7 @@ def train(args):
     if args.deterministic:
         # Use deterministic deformation transform
         train_tform = get_deterministic_transform(args.diffusion_steps, predict_x0=args.predict_x0)
-        print("Using deterministic deformation instead of random noise")
+        print_distributed(verbosity, "Using deterministic deformation instead of random noise")
     else:
         # Use regular diffusion transform
         train_tform = get_train_transform(dp, predict_x0=args.predict_x0)
@@ -68,9 +66,9 @@ def train(args):
     
     # Print prediction mode
     if args.predict_x0:
-        print("Training in x0-prediction mode: model will predict original positions")
+        print_distributed(verbosity, "Training in x0-prediction mode: model will predict original positions")
     else:
-        print("Training in epsilon-prediction mode: model will predict noise/deformation")
+        print_distributed(verbosity, "Training in epsilon-prediction mode: model will predict noise/deformation")
 
     # Load the QM9 dataset from torch WITHOUT transform (we'll apply it during training)
     # This prevents caching of transformed data with fixed noise
@@ -90,7 +88,7 @@ def train(args):
     if args.samples != None:
         dataset = dataset[: args.samples]
     else:
-        print("Training on Full Dataset")
+        print_distributed(verbosity, "Training on Full Dataset")
 
     # Make all graphs fully connected.
     dataset = [FullyConnectGraph()(data) for data in dataset]  # Apply to all graphs
@@ -116,11 +114,11 @@ def train(args):
     # Update the config with the dataloaders.
     config = config_utils.update_config(config, train_loader, val_loader, test_loader)
 
-    print(config['NeuralNetwork']['Variables_of_interest']['output_dim'])
-    print(config['NeuralNetwork']['Architecture']['output_dim'])
     config['NeuralNetwork']['Architecture']['output_dim'] = [5,3]
     # Save the config with all the updated stuff and initialize wandb
-    wandb_run = configure_wandb(project_name="graph diffusion model", config=config)
+    wandb_run = None
+    if 0 == rank:
+        wandb_run = configure_wandb(project_name="graph diffusion model", config=config)
 
     # Create the model from the config specifications
     model = hydragnn.models.create_model_config(
@@ -138,7 +136,6 @@ def train(args):
     )
 
     # Run training with the given model and dataset.
-    config["NeuralNetwork"]["Training"]["num_epoch"] = 100
     model = train_model(
         model,
         diffusion_loss,
@@ -157,7 +154,7 @@ if __name__ == "__main__":
 
     # Create default log name if not specified.
 
-    parser.add_argument("-s", "--samples", default=100, type=int)
+    parser.add_argument("-s", "--samples", default=None, type=int)
     parser.add_argument("-ds", "--diffusion_steps", default=100, type=int)
     parser.add_argument(
         "-c", "--config_path", type=str, default="examples/qm9/test.json"

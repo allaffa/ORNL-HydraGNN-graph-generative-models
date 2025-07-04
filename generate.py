@@ -5,7 +5,7 @@ import hydragnn
 from hydragnn.utils.distributed import get_distributed_model
 
 
-from src.utils import diffusion_utils as du
+from src.utils import data_utils as du
 from src.processes.marginal_diffusion import MarginalDiffusionProcess
 from src.utils.train_utils import insert_t, postprocess_model_outputs
 
@@ -32,13 +32,11 @@ def load_model(args):
         verbosity=verbosity,
     )
     # Distribute the model across ranks (if necessary).
-    # model = get_distributed_model(model, verbosity)
-    model.load_state_dict(
-        torch.load(
-            os.path.join(args.run_name, "checkpoints/model_best.pt"),
-            map_location=torch.device("mps"),
-        )["model_state_dict"]
-    )
+    # We need to unravel the model dictionary from the DDP wrapper before loading it
+    state_dict = torch.load(os.path.join(args.run_name, "checkpoints/model_best.pt"))["model_state_dict"]
+    # Remove 'module.' prefix
+    new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    model.load_state_dict(new_state_dict)
     return config, model
 
 
@@ -90,7 +88,7 @@ if __name__ == "__main__":
     # Create default log name if not specified.
     parser.add_argument("-g", "--num_gen", type=int, default=100)
     parser.add_argument(
-        "-d", "--data_path", type=str, default="../examples/qm9/dataset"
+        "-d", "--data_path", type=str, default="examples/qm9/dataset"
     )
     parser.add_argument("-ds", "--diffusion_steps", type=int, default=100)
     parser.add_argument("-l", "--run_name", type=str, default="test")
