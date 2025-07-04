@@ -1,4 +1,5 @@
 import os, yaml, argparse
+from datetime import datetime
 import torch
 
 import hydragnn
@@ -82,11 +83,17 @@ def generate(args):
     gen_data = dp.reverse_process_sample(prior_samples, predictor)
 
     gen_data_list = gen_data.to_data_list()
+
+    # Create folder
+    base_dir = os.path.join("models", "test", datetime.now().strftime("%Y%m%d_%H%M%S"))
+    os.makedirs(base_dir, exist_ok=True)
+
     # Write PDB files for generated data
     for i, gd in enumerate(gen_data_list):
         # postprocess by subtracting off CoM
         gd.pos = gd.pos - gd.pos.mean(dim=0, keepdim=True)
-        out_path = os.path.join("models", "test", "structures", f"gen_{i}.pdb")
+        out_path = os.path.join(base_dir, "structures", f"gen_{i}.pdb")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)  # Ensure 'structures/' subfolder exists
         du.write_pdb_file(gd, out_path)
 
 
