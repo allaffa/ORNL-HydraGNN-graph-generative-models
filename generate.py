@@ -6,7 +6,8 @@ from hydragnn.utils.distributed import get_distributed_model
 
 
 from src.utils import data_utils as du
-from src.processes.marginal_diffusion import MarginalDiffusionProcess
+#from src.processes.marginal_diffusion import MarginalDiffusionProcess
+from src.processes.marginal_diffusion import EquivariantDiffusionProcess
 from src.utils.train_utils import insert_t, postprocess_model_outputs
 
 
@@ -33,7 +34,11 @@ def load_model(args):
     )
     # Distribute the model across ranks (if necessary).
     # We need to unravel the model dictionary from the DDP wrapper before loading it
-    state_dict = torch.load(os.path.join(args.run_name, "checkpoints/model_best.pt"))["model_state_dict"]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    state_dict = torch.load(
+        os.path.join(args.run_name, "checkpoints/model_best.pt"),
+        map_location=device
+    )["model_state_dict"]
     # Remove 'module.' prefix
     new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
     model.load_state_dict(new_state_dict)
@@ -57,9 +62,12 @@ def generate(args):
     device = hydragnn.utils.distributed.get_device()
 
     # setup diffusion process
+    """
     dp = MarginalDiffusionProcess(
         args.diffusion_steps, marg_dist=du.get_marg_dist(root_path=args.data_path)
     )
+    """
+    dp = EquivariantDiffusionProcess(args.diffusion_steps)
 
     # Define prior distribution for the generative model
     prior_dist_state = dp.prior_dist(torch.randint(5, 20, (args.num_gen,)), 5, 3).to(
